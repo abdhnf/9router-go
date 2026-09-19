@@ -2,7 +2,7 @@
 /9router-go
 /9router-go-*
 *.exe
-web/dist/
+# web/dist/ (tracked for go:embed)
 
 # Test binaries
 *.test
