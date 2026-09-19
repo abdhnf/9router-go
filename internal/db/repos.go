@@ -318,6 +318,15 @@ func (r *Repo) GetComboByName(name string) (*models.Combo, error) {
 	var strat string
 	if err := r.db.QueryRow("SELECT strategy FROM combos WHERE id = ?", combo.ID).Scan(&strat); err == nil && strat != "" {
 		combo.Strategy = strat
+		return &combo, nil
+	}
+
+	// The canonical schema has no strategy column, so fall back to kv
+	// (scope "comboStrategies", key = combo name). Without this the router
+	// silently pins every combo to "fallback" no matter what the dashboard
+	// saved. See DASHBOARD.md §4.1.
+	if v, found, err := r.GetKV(comboStrategiesScope, combo.Name); err == nil && found && v != "" {
+		combo.Strategy = v
 	}
 
 	return &combo, nil
