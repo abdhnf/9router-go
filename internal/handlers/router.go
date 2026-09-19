@@ -2,9 +2,9 @@ package handlers
 
 import (
 	json "encoding/json/v2"
+	"github.com/go-chi/chi/v5"
 	"net/http"
 	"net/http/pprof"
-	"github.com/go-chi/chi/v5"
 
 	"9router/proxy/internal/constants"
 	"9router/proxy/internal/db"
@@ -14,6 +14,7 @@ import (
 	"9router/proxy/internal/handlers/oauth"
 	"9router/proxy/internal/handlers/shared"
 	"9router/proxy/internal/handlerutil"
+	"9router/proxy/internal/log"
 	"9router/proxy/internal/middleware"
 	"9router/proxy/web"
 )
@@ -144,10 +145,38 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 	r.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	r.HandleFunc("/debug/pprof/*", pprof.Index)
 
-	// API-key protected domain routes (includes /admin/health/reset so health
-	// state cannot be reset by an unauthenticated caller — open-source hardening)
+	// ---------- dashboard authentication ----------
+	//
+	// Public by necessity: these ARE the way in. Password login is separate
+	// from API-key auth on purpose — the LLM endpoints (/v1/*) keep working
+	// with a Bearer key, while the browser gets an HttpOnly session cookie so
+	// the admin credential never lives in localStorage.
+	dashAuthH := admin.NewAdminHandler(repo)
+	if _, err := repo.EnsureDefaultPassword(); err != nil {
+		log.Error("auth", "seed default password", "error", err)
+	}
+
+	r.Post("/api/auth/login", dashAuthH.HandleLogin)
+	r.Post("/api/auth/logout", dashAuthH.HandleLogout)
+	// Public: the login screen reads `mustChangePassword` to decide whether to
+	// keep showing the built-in default hint. The flag reveals only that the
+	// install still uses the default — which the login page prints anyway.
+	r.Get("/api/auth/status", dashAuthH.HandleAuthStatus)
+
+	// Password change needs a session but must not sit behind the full admin
+	// gate, otherwise an operator stuck on the forced-change screen could
+	// never satisfy it.
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.RequireApiKey(repo))
+		r.Use(middleware.RequireDashboardSession(repo))
+		r.Post("/api/auth/password", dashAuthH.HandleChangePassword)
+	})
+
+	// Engine domain routes. Accepts a Bearer API key OR the dashboard session
+	// cookie: /usage/stream lives in here and the console streams telemetry over
+	// its cookie. Auth strength is unchanged — the cookie is only issued after a
+	// correct password, and RequireApiKey still works exactly as before.
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireApiKeyOrSession(repo))
 
 		// Health reset endpoint — dashboard calls this via headroom proxy
 		r.Post("/admin/health/reset", func(w http.ResponseWriter, r *http.Request) {
@@ -162,81 +191,83 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 		})
 
 		SetupRoutes(r, repo, ts)
+	})
 
-		// Management API — dashboard UI. Mounted behind RequireApiKey AND
-		// RequireAdmin: an active key alone must not be able to delete every
-		// provider connection. See DASHBOARD.md §3.1.
-		r.Group(func(r chi.Router) {
-			r.Use(middleware.RequireAdmin(repo))
-			adminH := admin.NewAdminHandler(repo)
+	// Management API — dashboard UI. Accepts EITHER the dashboard session
+	// cookie (browser) OR a Bearer API key (curl, scripts, CI), then requires
+	// admin privilege. This cannot live inside the RequireApiKey group above:
+	// the console authenticates with a cookie and no longer holds an API key.
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequireApiKeyOrSession(repo))
+		r.Use(middleware.RequireAdmin(repo))
+		adminH := admin.NewAdminHandler(repo)
 
-			r.Get("/api/admin/meta", adminH.HandleMeta)
+		r.Get("/api/admin/meta", adminH.HandleMeta)
 
-			r.Route("/api/admin/connections", func(r chi.Router) {
-				r.Get("/", adminH.HandleConnections)
-				r.Post("/", adminH.HandleConnections)
-				r.Get("/{id}", func(w http.ResponseWriter, req *http.Request) {
-					adminH.HandleConnectionByID(w, req, chi.URLParam(req, "id"))
-				})
-				r.Patch("/{id}", func(w http.ResponseWriter, req *http.Request) {
-					adminH.HandleConnectionByID(w, req, chi.URLParam(req, "id"))
-				})
-				r.Delete("/{id}", func(w http.ResponseWriter, req *http.Request) {
-					adminH.HandleConnectionByID(w, req, chi.URLParam(req, "id"))
-				})
-				r.Post("/{id}/health/reset", func(w http.ResponseWriter, req *http.Request) {
-					adminH.HandleConnectionHealthReset(w, req, chi.URLParam(req, "id"))
-				})
+		r.Route("/api/admin/connections", func(r chi.Router) {
+			r.Get("/", adminH.HandleConnections)
+			r.Post("/", adminH.HandleConnections)
+			r.Get("/{id}", func(w http.ResponseWriter, req *http.Request) {
+				adminH.HandleConnectionByID(w, req, chi.URLParam(req, "id"))
 			})
+			r.Patch("/{id}", func(w http.ResponseWriter, req *http.Request) {
+				adminH.HandleConnectionByID(w, req, chi.URLParam(req, "id"))
+			})
+			r.Delete("/{id}", func(w http.ResponseWriter, req *http.Request) {
+				adminH.HandleConnectionByID(w, req, chi.URLParam(req, "id"))
+			})
+			r.Post("/{id}/health/reset", func(w http.ResponseWriter, req *http.Request) {
+				adminH.HandleConnectionHealthReset(w, req, chi.URLParam(req, "id"))
+			})
+		})
 
-			r.Route("/api/admin/api-keys", func(r chi.Router) {
-				r.Get("/", adminH.HandleApiKeys)
-				r.Post("/", adminH.HandleApiKeys)
-				r.Patch("/{id}", func(w http.ResponseWriter, req *http.Request) {
-					adminH.HandleApiKeyByID(w, req, chi.URLParam(req, "id"))
-				})
-				r.Delete("/{id}", func(w http.ResponseWriter, req *http.Request) {
-					adminH.HandleApiKeyByID(w, req, chi.URLParam(req, "id"))
-				})
+		r.Route("/api/admin/api-keys", func(r chi.Router) {
+			r.Get("/", adminH.HandleApiKeys)
+			r.Post("/", adminH.HandleApiKeys)
+			r.Patch("/{id}", func(w http.ResponseWriter, req *http.Request) {
+				adminH.HandleApiKeyByID(w, req, chi.URLParam(req, "id"))
 			})
+			r.Delete("/{id}", func(w http.ResponseWriter, req *http.Request) {
+				adminH.HandleApiKeyByID(w, req, chi.URLParam(req, "id"))
+			})
+		})
 
-			r.Route("/api/admin/combos", func(r chi.Router) {
-				r.Get("/", adminH.HandleCombos)
-				r.Post("/", adminH.HandleCombos)
-				r.Get("/{id}", func(w http.ResponseWriter, req *http.Request) {
-					adminH.HandleComboByID(w, req, chi.URLParam(req, "id"))
-				})
-				r.Patch("/{id}", func(w http.ResponseWriter, req *http.Request) {
-					adminH.HandleComboByID(w, req, chi.URLParam(req, "id"))
-				})
-				r.Delete("/{id}", func(w http.ResponseWriter, req *http.Request) {
-					adminH.HandleComboByID(w, req, chi.URLParam(req, "id"))
-				})
+		r.Route("/api/admin/combos", func(r chi.Router) {
+			r.Get("/", adminH.HandleCombos)
+			r.Post("/", adminH.HandleCombos)
+			r.Get("/{id}", func(w http.ResponseWriter, req *http.Request) {
+				adminH.HandleComboByID(w, req, chi.URLParam(req, "id"))
 			})
+			r.Patch("/{id}", func(w http.ResponseWriter, req *http.Request) {
+				adminH.HandleComboByID(w, req, chi.URLParam(req, "id"))
+			})
+			r.Delete("/{id}", func(w http.ResponseWriter, req *http.Request) {
+				adminH.HandleComboByID(w, req, chi.URLParam(req, "id"))
+			})
+		})
 
-			r.Route("/api/admin/provider-nodes", func(r chi.Router) {
-				r.Get("/", adminH.HandleProviderNodes)
-				r.Post("/", adminH.HandleProviderNodes)
-				r.Patch("/{id}", func(w http.ResponseWriter, req *http.Request) {
-					adminH.HandleProviderNodeByID(w, req, chi.URLParam(req, "id"))
-				})
-				r.Delete("/{id}", func(w http.ResponseWriter, req *http.Request) {
-					adminH.HandleProviderNodeByID(w, req, chi.URLParam(req, "id"))
-				})
+		r.Route("/api/admin/provider-nodes", func(r chi.Router) {
+			r.Get("/", adminH.HandleProviderNodes)
+			r.Post("/", adminH.HandleProviderNodes)
+			r.Patch("/{id}", func(w http.ResponseWriter, req *http.Request) {
+				adminH.HandleProviderNodeByID(w, req, chi.URLParam(req, "id"))
 			})
+			r.Delete("/{id}", func(w http.ResponseWriter, req *http.Request) {
+				adminH.HandleProviderNodeByID(w, req, chi.URLParam(req, "id"))
+			})
+		})
 
-			r.Get("/api/admin/settings", adminH.HandleSettings)
-			r.Put("/api/admin/settings", adminH.HandleSettings)
+		r.Get("/api/admin/settings", adminH.HandleSettings)
+		r.Put("/api/admin/settings", adminH.HandleSettings)
 
-			r.Get("/api/admin/kv/{scope}/{key}", func(w http.ResponseWriter, req *http.Request) {
-				adminH.HandleKV(w, req, chi.URLParam(req, "scope"), chi.URLParam(req, "key"))
-			})
-			r.Put("/api/admin/kv/{scope}/{key}", func(w http.ResponseWriter, req *http.Request) {
-				adminH.HandleKV(w, req, chi.URLParam(req, "scope"), chi.URLParam(req, "key"))
-			})
-			r.Delete("/api/admin/kv/{scope}/{key}", func(w http.ResponseWriter, req *http.Request) {
-				adminH.HandleKV(w, req, chi.URLParam(req, "scope"), chi.URLParam(req, "key"))
-			})
+		r.Get("/api/admin/kv/{scope}/{key}", func(w http.ResponseWriter, req *http.Request) {
+			adminH.HandleKV(w, req, chi.URLParam(req, "scope"), chi.URLParam(req, "key"))
+		})
+		r.Put("/api/admin/kv/{scope}/{key}", func(w http.ResponseWriter, req *http.Request) {
+			adminH.HandleKV(w, req, chi.URLParam(req, "scope"), chi.URLParam(req, "key"))
+		})
+		r.Delete("/api/admin/kv/{scope}/{key}", func(w http.ResponseWriter, req *http.Request) {
+			adminH.HandleKV(w, req, chi.URLParam(req, "scope"), chi.URLParam(req, "key"))
 		})
 	})
 

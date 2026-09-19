@@ -5,6 +5,7 @@ import (
 	json "encoding/json/v2"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"9router/proxy/internal/models"
@@ -12,6 +13,24 @@ import (
 
 type Repo struct {
 	db *sql.DB
+
+	// kvOnce guards the one-time creation of the `kv` table. The engine does not
+	// own the full schema — dashboard migrations create the domain tables — but
+	// `kv` is read and written directly by the engine, so it must exist even
+	// against a database no dashboard has touched yet. Caching the result keeps
+	// per-request callers (session validation) from paying for a CREATE TABLE on
+	// every request.
+	kvOnce sync.Once
+	kvErr  error
+}
+
+// ensureKVTable creates the `kv` table if it is missing. Idempotent and cheap
+// after the first call.
+func (r *Repo) ensureKVTable() error {
+	r.kvOnce.Do(func() {
+		_, r.kvErr = r.db.Exec(createKVTable)
+	})
+	return r.kvErr
 }
 
 // NewRepo creates a new repository instance using the provided SQL database connection.

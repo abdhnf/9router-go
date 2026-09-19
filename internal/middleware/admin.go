@@ -23,6 +23,14 @@ import (
 func RequireAdmin(repo *db.Repo) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// A logged-in dashboard operator is privileged by definition: they
+			// proved possession of the admin password. Only Bearer-key callers
+			// need to be checked against the admin key list.
+			if IsSessionAuthenticated(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			key := GetAuthenticatedApiKey(r)
 			if key == nil {
 				handlerutil.WriteJSONError(w, http.StatusUnauthorized, "Authentication required.")

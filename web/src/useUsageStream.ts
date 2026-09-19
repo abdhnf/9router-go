@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { SESSION_EXPIRED_EVENT } from './api'
 
 export interface UsageMetrics {
   activeRequests: number
@@ -22,20 +23,23 @@ const RECONNECT_DELAY_MS = 3000
 /**
  * Streams `/usage/stream` into React state.
  *
- * Uses fetch + ReadableStream rather than EventSource on purpose: the endpoint
- * sits behind RequireApiKey, and EventSource cannot attach an Authorization
- * header. With EventSource the request always answers 401 and every telemetry
- * card silently stays at zero. Passing the key via `?key=` is not an option —
- * ExtractApiKey deliberately rejects query-string keys because they leak
- * through browser history, referrers, and upstream proxy logs.
+ * Uses fetch + ReadableStream rather than EventSource on purpose: EventSource
+ * cannot attach an Authorization header, and passing the key via `?key=` is not
+ * an option because ExtractApiKey deliberately rejects query-string keys (they
+ * leak through browser history, referrers, and upstream proxy logs).
+ *
+ * Auth now rides on the session cookie, so `credentials: 'include'` replaces the
+ * bearer header. A 401 means the session died (engine restart, logout, expired
+ * cookie): retrying cannot fix it and would hammer the engine every few seconds,
+ * so we stop and let the App drop to the login screen.
  */
-export function useUsageStream(apiKey: string, enabled: boolean) {
+export function useUsageStream(enabled: boolean) {
   const [metrics, setMetrics] = useState<UsageMetrics>(INITIAL_METRICS)
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    if (!enabled || !apiKey) return
+    if (!enabled) return
 
     const controller = new AbortController()
     let reconnectTimer: number | undefined
@@ -59,16 +63,14 @@ export function useUsageStream(apiKey: string, enabled: boolean) {
     const pump = async () => {
       try {
         const res = await fetch('/usage/stream', {
-          headers: { Authorization: `Bearer ${apiKey}` },
+          credentials: 'include',
           signal: controller.signal,
         })
 
-        // 401/403 means the stored key is stale or revoked. Retrying cannot
-        // fix it and would hammer the engine with an unauthenticated request
-        // every few seconds, so stop and let the UI return to the login gate.
         if (res.status === 401 || res.status === 403) {
           setConnected(false)
           setError('unauthorized')
+          window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT))
           return
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -112,7 +114,7 @@ export function useUsageStream(apiKey: string, enabled: boolean) {
       if (reconnectTimer) window.clearTimeout(reconnectTimer)
       setConnected(false)
     }
-  }, [apiKey, enabled])
+  }, [enabled])
 
   return { metrics, connected, error }
 }

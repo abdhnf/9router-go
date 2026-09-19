@@ -27,6 +27,9 @@ func ComboStrategiesScope() string { return comboStrategiesScope }
 // GetKV returns the raw value for (scope, key). found=false when no row exists,
 // which callers must distinguish from an empty value.
 func (r *Repo) GetKV(scope, key string) (value string, found bool, err error) {
+	if err := r.ensureKVTable(); err != nil {
+		return "", false, err
+	}
 	var v string
 	err = r.db.QueryRow(
 		`SELECT value FROM kv WHERE scope = ? AND key = ? LIMIT 1`, scope, key,
@@ -42,6 +45,9 @@ func (r *Repo) GetKV(scope, key string) (value string, found bool, err error) {
 
 // SetKV upserts a (scope, key) pair.
 func (r *Repo) SetKV(scope, key, value string) error {
+	if err := r.ensureKVTable(); err != nil {
+		return err
+	}
 	_, err := r.db.Exec(
 		`INSERT INTO kv (scope, key, value) VALUES (?, ?, ?)
 		 ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value`,
@@ -55,6 +61,9 @@ func (r *Repo) SetKV(scope, key, value string) error {
 
 // DeleteKV removes a (scope, key) pair. Missing rows are not an error.
 func (r *Repo) DeleteKV(scope, key string) error {
+	if err := r.ensureKVTable(); err != nil {
+		return err
+	}
 	_, err := r.db.Exec(`DELETE FROM kv WHERE scope = ? AND key = ?`, scope, key)
 	if err != nil {
 		return fmt.Errorf("delete kv %s/%s: %w", scope, key, err)

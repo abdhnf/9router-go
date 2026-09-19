@@ -17,9 +17,12 @@ import {
   CheckCircle2,
   AlertCircle,
   X,
-  Lock
+  Lock,
+  Loader2
 } from 'lucide-react'
 import { useUsageStream, type UsageMetrics } from './useUsageStream'
+import { apiFetch, apiSend, SESSION_EXPIRED_EVENT } from './api'
+import { LoginScreen, ForcePasswordChange, PasswordSettings } from './AuthScreens'
 
 interface Connection {
   id: string
@@ -54,13 +57,13 @@ interface ProviderOption {
  * supports but the array omits becomes unreachable from the console, which is
  * exactly how the free providers were missing.
  */
-function useProviders(apiKey: string) {
+function useProviders() {
   const [providers, setProviders] = useState<ProviderOption[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     let cancelled = false
-    fetch('/api/admin/meta', { headers: { Authorization: `Bearer ${apiKey}` } })
+    apiFetch('/api/admin/meta')
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
       .then((meta) => {
         if (cancelled) return
@@ -75,7 +78,7 @@ function useProviders(apiKey: string) {
     return () => {
       cancelled = true
     }
-  }, [apiKey])
+  }, [])
 
   return { providers, loading }
 }
@@ -90,90 +93,89 @@ const STRATEGY_OPTIONS = [
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'overview' | 'connections' | 'combos' | 'keys' | 'logs' | 'settings'>('overview')
-  const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('9router_admin_key') || '')
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => !!localStorage.getItem('9router_admin_key'))
-  const [authError, setAuthError] = useState<string>('')
+  // 'checking' until /api/auth/status answers, so a valid session does not
+  // flash the login screen on every page load.
+  const [authState, setAuthState] = useState<'checking' | 'anonymous' | 'authenticated'>('checking')
+  const [mustChangePassword, setMustChangePassword] = useState(false)
+  const [authNotice, setAuthNotice] = useState('')
 
-  // Realtime telemetry over authenticated SSE (fetch + ReadableStream).
-  const { metrics, connected: sseConnected, error: streamError } = useUsageStream(apiKey, isAuthenticated)
+  const isAuthenticated = authState === 'authenticated'
 
-  // A stored key that the engine rejects (rotated, revoked, or from another
-  // instance) must send the operator back to the login gate instead of leaving
-  // them on a dashboard where every panel silently stays empty.
+  // Realtime telemetry over the session cookie (fetch + ReadableStream).
+  const { metrics, connected: sseConnected } = useUsageStream(isAuthenticated)
+
+  // Any 401 from any call means the session is gone: engine restarted, cookie
+  // expired, or the password was changed elsewhere. Drop to the login screen
+  // instead of leaving every panel silently empty.
   useEffect(() => {
-    if (streamError === 'unauthorized') {
-      localStorage.removeItem('9router_admin_key')
-      setIsAuthenticated(false)
-      setAuthError('API Key ditolak engine (401). Masukkan ulang key yang valid.')
+    const onExpired = () => {
+      setAuthState('anonymous')
+      setAuthNotice('Sesi berakhir. Silakan login kembali.')
     }
-  }, [streamError])
+    window.addEventListener(SESSION_EXPIRED_EVENT, onExpired)
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired)
+  }, [])
 
-  // Save admin key
-  const handleLogin = (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!apiKey.trim()) {
-      setAuthError('API Key tidak boleh kosong')
-      return
+  // Resume an existing session on load — the cookie is HttpOnly, so the
+  // browser cannot tell us whether it is valid; only the engine can.
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/auth/status', { credentials: 'include' })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((s) => {
+        if (cancelled) return
+        setMustChangePassword(!!s.mustChangePassword)
+        setAuthState(s.authenticated ? 'authenticated' : 'anonymous')
+      })
+      .catch(() => {
+        if (!cancelled) setAuthState('anonymous')
+      })
+    return () => {
+      cancelled = true
     }
-    localStorage.setItem('9router_admin_key', apiKey.trim())
-    setIsAuthenticated(true)
-    setAuthError('')
+  }, [])
+
+  const handleLogout = async () => {
+    try {
+      await apiSend('/api/auth/logout', 'POST')
+    } catch {
+      // Even if the call fails the cookie is cleared server-side on expiry;
+      // never trap the operator inside the console.
+    }
+    setAuthState('anonymous')
+    setAuthNotice('')
   }
 
-  const handleLogout = () => {
-    localStorage.removeItem('9router_admin_key')
-    setIsAuthenticated(false)
-  }
-
-  if (!isAuthenticated) {
+  if (authState === 'checking') {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
-        <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-2xl">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="p-2.5 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-emerald-400">
-              <Cpu className="w-6 h-6" />
-            </div>
-            <div>
-              <h1 className="text-xl font-bold tracking-tight text-white">9Router Console</h1>
-              <p className="text-xs text-slate-400 font-mono">High-Performance LLM Gateway</p>
-            </div>
-          </div>
-
-          <form onSubmit={handleLogin} className="space-y-4">
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1.5 uppercase tracking-wider font-mono">
-                Admin API Key
-              </label>
-              <input
-                type="password"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder="sk-..."
-                className="w-full px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 font-mono transition-all"
-                autoFocus
-              />
-              {authError && (
-                <p className="text-xs text-rose-400 mt-1.5 font-medium">{authError}</p>
-              )}
-            </div>
-
-            <button
-              type="submit"
-              className="w-full py-2.5 px-4 bg-emerald-500 hover:bg-emerald-400 active:scale-[0.98] text-slate-950 font-semibold rounded-lg text-sm transition-all shadow-lg shadow-emerald-500/10"
-            >
-              Sign In to Console
-            </button>
-          </form>
-
-          <div className="mt-6 pt-6 border-t border-slate-800/80 text-center">
-            <p className="text-xs text-slate-500">
-              Direct connection to local engine daemon
-            </p>
-          </div>
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <div className="flex items-center gap-2.5 text-slate-500">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          <span className="text-xs font-mono">Memeriksa sesi…</span>
         </div>
       </div>
     )
   }
+
+  // The default password must be replaced before the console renders: a
+  // LAN-reachable install sitting on `123456` is an open door.
+  if (isAuthenticated && mustChangePassword) {
+    return <ForcePasswordChange onDone={() => setMustChangePassword(false)} />
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <LoginScreen
+        notice={authNotice}
+        onSuccess={(mustChange) => {
+          setMustChangePassword(mustChange)
+          setAuthNotice('')
+          setAuthState('authenticated')
+        }}
+      />
+    )
+  }
+
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col md:flex-row">
@@ -247,7 +249,7 @@ export default function App() {
           <div className="flex items-center justify-between px-2 py-1.5 mb-2">
             <div>
               <p className="text-xs font-semibold text-slate-200">Admin Session</p>
-              <p className="text-[10px] text-slate-400 font-mono">SQLite WAL Master</p>
+              <p className="text-[10px] text-slate-400 font-mono">Password login</p>
             </div>
             <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
               RBAC OK
@@ -289,9 +291,9 @@ export default function App() {
         {/* Tab Body */}
         <div className="p-6 max-w-7xl w-full mx-auto space-y-6">
           {activeTab === 'overview' && <OverviewView metrics={metrics} onNavigate={setActiveTab} />}
-          {activeTab === 'connections' && <ConnectionsView apiKey={apiKey} />}
-          {activeTab === 'combos' && <CombosView apiKey={apiKey} />}
-          {activeTab === 'keys' && <ApiKeysView apiKey={apiKey} />}
+          {activeTab === 'connections' && <ConnectionsView />}
+          {activeTab === 'combos' && <CombosView />}
+          {activeTab === 'keys' && <ApiKeysView />}
           {activeTab === 'logs' && <LogsView />}
           {activeTab === 'settings' && <SettingsView />}
         </div>
@@ -430,13 +432,13 @@ function OverviewView({ metrics, onNavigate }: { metrics: UsageMetrics; onNaviga
 // ==========================================
 // 1. PROVIDER CONNECTIONS VIEW & MODALS
 // ==========================================
-function ConnectionsView({ apiKey }: { apiKey: string }) {
+function ConnectionsView() {
   const [connections, setConnections] = useState<Connection[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [searchTerm, setSearchTerm] = useState('')
 
-  const { providers } = useProviders(apiKey)
+  const { providers } = useProviders()
 
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false)
@@ -445,9 +447,7 @@ function ConnectionsView({ apiKey }: { apiKey: string }) {
   const fetchConnections = async () => {
     setLoading(true)
     try {
-      const res = await fetch('/api/admin/connections', {
-        headers: { Authorization: `Bearer ${apiKey}` }
-      })
+      const res = await apiFetch('/api/admin/connections')
       if (!res.ok) throw new Error(`HTTP ${res.status}: Gagal memuat data connections`)
       const data = await res.json()
       setConnections(data.connections || [])
@@ -466,11 +466,10 @@ function ConnectionsView({ apiKey }: { apiKey: string }) {
   const handleToggleActive = async (conn: Connection) => {
     try {
       const newActive = conn.isActive === 1 ? 0 : 1
-      const res = await fetch(`/api/admin/connections/${conn.id}`, {
+      const res = await apiFetch(`/api/admin/connections/${conn.id}`, {
         method: 'PATCH',
         headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify({ isActive: newActive === 1 })
       })
@@ -484,9 +483,8 @@ function ConnectionsView({ apiKey }: { apiKey: string }) {
   const handleDelete = async (id: string, name: string) => {
     if (!confirm(`Hapus provider connection "${name}"?`)) return
     try {
-      const res = await fetch(`/api/admin/connections/${id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${apiKey}` }
+      const res = await apiFetch(`/api/admin/connections/${id}`, {
+        method: 'DELETE'
       })
       if (!res.ok) throw new Error('Gagal menghapus connection')
       setConnections(connections.filter(c => c.id !== id))
@@ -638,7 +636,6 @@ function ConnectionsView({ apiKey }: { apiKey: string }) {
       {isModalOpen && (
         <ConnectionModal
           conn={editingConn}
-          apiKey={apiKey}
           providers={providers}
           onClose={() => setIsModalOpen(false)}
           onSuccess={() => { setIsModalOpen(false); fetchConnections(); }}
@@ -650,13 +647,11 @@ function ConnectionsView({ apiKey }: { apiKey: string }) {
 
 function ConnectionModal({
   conn,
-  apiKey,
   providers,
   onClose,
   onSuccess
 }: {
   conn: Connection | null
-  apiKey: string
   providers: ProviderOption[]
   onClose: () => void
   onSuccess: () => void
@@ -708,11 +703,10 @@ function ConnectionModal({
           patchBody.data = dataPatch
         }
 
-        const res = await fetch(`/api/admin/connections/${conn.id}`, {
+        const res = await apiFetch(`/api/admin/connections/${conn.id}`, {
           method: 'PATCH',
           headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`
+            'Content-Type': 'application/json'
           },
           body: JSON.stringify(patchBody)
         })
@@ -734,11 +728,10 @@ function ConnectionModal({
             providerSpecificData: baseUrl ? { baseUrl } : {}
           }
         }
-        const res = await fetch('/api/admin/connections', {
+        const res = await apiFetch('/api/admin/connections', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`
+            'Content-Type': 'application/json'
           },
           body: JSON.stringify(createBody)
         })
@@ -884,7 +877,7 @@ function ConnectionModal({
 // ==========================================
 // 2. COMBOS & ROUTING MATRIX VIEW & MODALS
 // ==========================================
-function CombosView({ apiKey }: { apiKey: string }) {
+function CombosView() {
   const [combos, setCombos] = useState<Combo[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -894,9 +887,7 @@ function CombosView({ apiKey }: { apiKey: string }) {
   const fetchCombos = async () => {
     setLoading(true)
     try {
-      const res = await fetch('/api/admin/combos', {
-        headers: { Authorization: `Bearer ${apiKey}` }
-      })
+      const res = await apiFetch('/api/admin/combos')
       if (!res.ok) throw new Error(`HTTP ${res.status}: Gagal memuat combos`)
       const data = await res.json()
       setCombos(data.combos || [])
@@ -915,9 +906,8 @@ function CombosView({ apiKey }: { apiKey: string }) {
   const handleDelete = async (id: string, name: string) => {
     if (!confirm(`Hapus combo model "${name}"?`)) return
     try {
-      const res = await fetch(`/api/admin/combos/${id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${apiKey}` }
+      const res = await apiFetch(`/api/admin/combos/${id}`, {
+        method: 'DELETE'
       })
       if (!res.ok) throw new Error('Gagal menghapus combo')
       setCombos(combos.filter(c => c.id !== id))
@@ -1037,7 +1027,6 @@ function CombosView({ apiKey }: { apiKey: string }) {
       {isModalOpen && (
         <ComboModal
           combo={editingCombo}
-          apiKey={apiKey}
           onClose={() => setIsModalOpen(false)}
           onSuccess={() => { setIsModalOpen(false); fetchCombos(); }}
         />
@@ -1048,12 +1037,10 @@ function CombosView({ apiKey }: { apiKey: string }) {
 
 function ComboModal({
   combo,
-  apiKey,
   onClose,
   onSuccess
 }: {
   combo: Combo | null
-  apiKey: string
   onClose: () => void
   onSuccess: () => void
 }) {
@@ -1083,11 +1070,10 @@ function ComboModal({
       }
 
       if (isEdit) {
-        const res = await fetch(`/api/admin/combos/${combo.id}`, {
+        const res = await apiFetch(`/api/admin/combos/${combo.id}`, {
           method: 'PATCH',
           headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`
+            'Content-Type': 'application/json'
           },
           body: JSON.stringify({
             name,
@@ -1100,11 +1086,10 @@ function ComboModal({
           throw new Error(b.error?.message || 'Gagal update combo')
         }
       } else {
-        const res = await fetch('/api/admin/combos', {
+        const res = await apiFetch('/api/admin/combos', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`
+            'Content-Type': 'application/json'
           },
           body: JSON.stringify({
             name,
@@ -1208,15 +1193,13 @@ function ComboModal({
   )
 }
 
-function ApiKeysView({ apiKey }: { apiKey: string }) {
+function ApiKeysView() {
   const [keys, setKeys] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    fetch('/api/admin/api-keys', {
-      headers: { Authorization: `Bearer ${apiKey}` }
-    })
+    apiFetch('/api/admin/api-keys')
       .then(res => res.json())
       .then(d => { setKeys(d.apiKeys || []); setLoading(false); })
       .catch(e => { setError(e.message); setLoading(false); })
@@ -1264,12 +1247,16 @@ function LogsView() {
 
 function SettingsView() {
   return (
-    <div className="p-8 text-center border border-dashed border-slate-800 rounded-xl bg-slate-900/30">
-      <Settings className="w-8 h-8 text-slate-600 mx-auto mb-3" />
-      <h3 className="text-sm font-semibold text-white">System Settings</h3>
-      <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
-        Konfigurasi Token Saver, Auto Update, dan Headroom process throttle.
-      </p>
+    <div className="space-y-6">
+      <PasswordSettings />
+
+      <div className="p-8 text-center border border-dashed border-slate-800 rounded-xl bg-slate-900/30">
+        <Settings className="w-8 h-8 text-slate-600 mx-auto mb-3" />
+        <h3 className="text-sm font-semibold text-white">System Settings</h3>
+        <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
+          Konfigurasi Token Saver, Auto Update, dan Headroom process throttle.
+        </p>
+      </div>
     </div>
   )
 }
