@@ -6,12 +6,14 @@ import (
 	json "encoding/json/v2"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"9router/proxy/internal/constants"
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/models"
+	"9router/proxy/internal/providers"
 )
 
 // Handler serves the management API consumed by the dashboard UI.
@@ -646,6 +648,27 @@ func (h *Handler) HandleProviderNodeByID(w http.ResponseWriter, r *http.Request,
 
 // ---------- meta ----------
 
+// ProviderOption is one selectable upstream provider for the dashboard.
+// noAuth marks a provider that needs no credential at all (a genuinely free
+// endpoint), which is what the UI surfaces as the "free tier" list.
+type ProviderOption struct {
+	ID     string `json:"id"`
+	NoAuth bool   `json:"noAuth"`
+}
+
+// providerOptions is built from providers.KnownProviders so the dashboard
+// select can never drift from what the engine actually routes to. The list was
+// previously hardcoded in the frontend, which meant any provider the engine
+// supported but the UI did not list was simply unreachable from the console.
+func providerOptions() []ProviderOption {
+	options := make([]ProviderOption, 0, len(providers.KnownProviders))
+	for id, cfg := range providers.KnownProviders {
+		options = append(options, ProviderOption{ID: id, NoAuth: cfg.NoAuth})
+	}
+	sort.Slice(options, func(i, j int) bool { return options[i].ID < options[j].ID })
+	return options
+}
+
 // HandleMeta exposes the vocabulary the UI needs to render selects correctly,
 // so the frontend never hardcodes strategy names or scope names.
 func (h *Handler) HandleMeta(w http.ResponseWriter, r *http.Request) {
@@ -655,6 +678,7 @@ func (h *Handler) HandleMeta(w http.ResponseWriter, r *http.Request) {
 		"cavemanLevels":   []string{"lite", "full", "ultra", "wenyan-ultra"},
 		"ponytailLevels":  []string{"lite", "full", "ultra"},
 		"authTypes":       []string{"api-key", "oauth", "cookie"},
+		"providers":       providerOptions(),
 		"notes": map[string]string{
 			"comboStrategy": "Disimpan di dalam JSON models, bukan kolom terpisah.",
 			"connectionData": "Field data di-merge, bukan diganti. Berisi modelLock_* dan backoffLevel.",

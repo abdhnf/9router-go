@@ -41,7 +41,7 @@ export function useUsageStream(apiKey: string, enabled: boolean) {
     let reconnectTimer: number | undefined
     let disposed = false
 
-    // One SSE frame: join every `data:` line, ignore `: ping` keep-alives.
+    // One SSE frame: join every `data:` lines, ignore `: ping` keep-alives.
     const dispatch = (frame: string) => {
       const payload = frame
         .split('\n')
@@ -62,6 +62,15 @@ export function useUsageStream(apiKey: string, enabled: boolean) {
           headers: { Authorization: `Bearer ${apiKey}` },
           signal: controller.signal,
         })
+
+        // 401/403 means the stored key is stale or revoked. Retrying cannot
+        // fix it and would hammer the engine with an unauthenticated request
+        // every few seconds, so stop and let the UI return to the login gate.
+        if (res.status === 401 || res.status === 403) {
+          setConnected(false)
+          setError('unauthorized')
+          return
+        }
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         if (!res.body) throw new Error('Response body tidak tersedia')
 

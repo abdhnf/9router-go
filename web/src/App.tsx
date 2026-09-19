@@ -43,18 +43,42 @@ interface Combo {
   context_length?: number
 }
 
-const PROVIDER_OPTIONS = [
-  { id: 'openai-compatible-chat', name: 'OpenAI Compatible (Custom API)' },
-  { id: 'anthropic-compatible', name: 'Anthropic Compatible' },
-  { id: 'gemini', name: 'Google Gemini' },
-  { id: 'openrouter', name: 'OpenRouter' },
-  { id: 'nvidia', name: 'Nvidia NIM' },
-  { id: 'cloudflare-ai', name: 'Cloudflare Workers AI' },
-  { id: 'codebuddy-intl', name: 'CodeBuddy Intl' },
-  { id: 'kiro', name: 'Kiro (AWS Builder ID)' },
-  { id: 'antigravity', name: 'Google Antigravity' },
-  { id: 'ollama', name: 'Ollama' },
-]
+interface ProviderOption {
+  id: string
+  noAuth: boolean
+}
+
+/**
+ * Provider list comes from the engine (`/api/admin/meta`) rather than a
+ * hardcoded array. A local list silently drifts: any provider the engine
+ * supports but the array omits becomes unreachable from the console, which is
+ * exactly how the free providers were missing.
+ */
+function useProviders(apiKey: string) {
+  const [providers, setProviders] = useState<ProviderOption[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/admin/meta', { headers: { Authorization: `Bearer ${apiKey}` } })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((meta) => {
+        if (cancelled) return
+        setProviders(Array.isArray(meta.providers) ? meta.providers : [])
+      })
+      .catch(() => {
+        if (!cancelled) setProviders([])
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [apiKey])
+
+  return { providers, loading }
+}
 
 const STRATEGY_OPTIONS = [
   { id: 'fallback', label: 'Fallback (Prioritas Berurutan)', desc: 'Coba model pertama, alihkan ke model berikutnya bila limit/error' },
@@ -71,7 +95,18 @@ export default function App() {
   const [authError, setAuthError] = useState<string>('')
 
   // Realtime telemetry over authenticated SSE (fetch + ReadableStream).
-  const { metrics, connected: sseConnected } = useUsageStream(apiKey, isAuthenticated)
+  const { metrics, connected: sseConnected, error: streamError } = useUsageStream(apiKey, isAuthenticated)
+
+  // A stored key that the engine rejects (rotated, revoked, or from another
+  // instance) must send the operator back to the login gate instead of leaving
+  // them on a dashboard where every panel silently stays empty.
+  useEffect(() => {
+    if (streamError === 'unauthorized') {
+      localStorage.removeItem('9router_admin_key')
+      setIsAuthenticated(false)
+      setAuthError('API Key ditolak engine (401). Masukkan ulang key yang valid.')
+    }
+  }, [streamError])
 
   // Save admin key
   const handleLogin = (e: React.FormEvent) => {
@@ -401,6 +436,8 @@ function ConnectionsView({ apiKey }: { apiKey: string }) {
   const [error, setError] = useState('')
   const [searchTerm, setSearchTerm] = useState('')
 
+  const { providers } = useProviders(apiKey)
+
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [editingConn, setEditingConn] = useState<Connection | null>(null)
@@ -602,6 +639,7 @@ function ConnectionsView({ apiKey }: { apiKey: string }) {
         <ConnectionModal
           conn={editingConn}
           apiKey={apiKey}
+          providers={providers}
           onClose={() => setIsModalOpen(false)}
           onSuccess={() => { setIsModalOpen(false); fetchConnections(); }}
         />
@@ -613,11 +651,13 @@ function ConnectionsView({ apiKey }: { apiKey: string }) {
 function ConnectionModal({
   conn,
   apiKey,
+  providers,
   onClose,
   onSuccess
 }: {
   conn: Connection | null
   apiKey: string
+  providers: ProviderOption[]
   onClose: () => void
   onSuccess: () => void
 }) {
@@ -754,8 +794,10 @@ function ConnectionModal({
                 onChange={e => setProvider(e.target.value)}
                 className="w-full px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-slate-100 focus:outline-none focus:border-emerald-500 disabled:opacity-50"
               >
-                {PROVIDER_OPTIONS.map(p => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
+                {providers.map(p => (
+                  <option key={p.id} value={p.id}>
+                    {p.noAuth ? `${p.id} — gratis (tanpa API key)` : p.id}
+                  </option>
                 ))}
               </select>
             </div>

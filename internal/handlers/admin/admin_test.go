@@ -10,6 +10,7 @@ import (
 
 	"9router/proxy/internal/db"
 	"9router/proxy/internal/dbtest"
+	"9router/proxy/internal/providers"
 )
 
 func newTestRepo(t *testing.T) *db.Repo {
@@ -337,6 +338,56 @@ func TestMetaExposesVocabulary(t *testing.T) {
 	for _, want := range []string{"sticky", "round-robin", "fusion", "wenyan-ultra", "modelAliases"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("meta tidak memuat %q", want)
+		}
+	}
+}
+
+// TestMetaListsEngineProviders guards the provider select against drifting from
+// what the engine can actually route to. The frontend used to hardcode a short
+// list, so every provider missing from it was unreachable from the console even
+// though the engine supported it.
+func TestMetaListsEngineProviders(t *testing.T) {
+	repo := newTestRepo(t)
+	h := NewAdminHandler(repo)
+
+	rec := do(t, h, http.MethodGet, "/api/admin/meta", "", h.HandleMeta)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+
+	var payload struct {
+		Providers []ProviderOption `json:"providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode meta: %v", err)
+	}
+
+	if len(payload.Providers) != len(providers.KnownProviders) {
+		t.Fatalf("providers = %d, mau %d (harus sama dengan KnownProviders)",
+			len(payload.Providers), len(providers.KnownProviders))
+	}
+
+	// A free provider the engine exposes without any credential must be
+	// reachable and flagged, otherwise the console cannot offer it at all.
+	var mimoFree *ProviderOption
+	for i := range payload.Providers {
+		if payload.Providers[i].ID == "mimo-free" {
+			mimoFree = &payload.Providers[i]
+			break
+		}
+	}
+	if mimoFree == nil {
+		t.Fatal("mimo-free tidak ada di daftar providers meta")
+	}
+	if !mimoFree.NoAuth {
+		t.Error("mimo-free harus ditandai noAuth=true")
+	}
+
+	// Sorted output keeps the dashboard select stable between reloads.
+	for i := 1; i < len(payload.Providers); i++ {
+		if payload.Providers[i-1].ID >= payload.Providers[i].ID {
+			t.Fatalf("providers tidak terurut: %q sebelum %q",
+				payload.Providers[i-1].ID, payload.Providers[i].ID)
 		}
 	}
 }
