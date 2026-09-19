@@ -15,6 +15,7 @@ import (
 	"9router/proxy/internal/handlers/shared"
 	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/middleware"
+	"9router/proxy/web"
 )
 
 // Re-export TokenSaverConfig for root compatibility
@@ -238,4 +239,7 @@ func SetupServerRouter(r chi.Router, repo *db.Repo, ts *TokenSaverConfig) {
 			})
 		})
 	})
+
+	// Embedded Dashboard UI (Web SPA)
+	web.RegisterDashboardRoutes(r)
 }
