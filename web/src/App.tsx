@@ -9,9 +9,7 @@ import {
   Settings,
   ShieldAlert,
   Cpu,
-  RefreshCw,
   Search,
-  ExternalLink,
   ChevronRight,
   Plus,
   Edit2,
@@ -19,25 +17,9 @@ import {
   CheckCircle2,
   AlertCircle,
   X,
-  Lock,
-  Layers,
-  Sparkles,
-  ArrowUpDown,
-  Filter,
-  Eye,
-  EyeOff
+  Lock
 } from 'lucide-react'
-
-// Types
-interface SSEMetrics {
-  activeRequests: number
-  recentRequests: number
-  errorProvider: string
-  pending: {
-    total: number
-    byAccount?: Record<string, Record<string, number>>
-  }
-}
+import { useUsageStream, type UsageMetrics } from './useUsageStream'
 
 interface Connection {
   id: string
@@ -87,15 +69,9 @@ export default function App() {
   const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('9router_admin_key') || '')
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => !!localStorage.getItem('9router_admin_key'))
   const [authError, setAuthError] = useState<string>('')
-  
-  // Realtime SSE State
-  const [metrics, setMetrics] = useState<SSEMetrics>({
-    activeRequests: 0,
-    recentRequests: 0,
-    errorProvider: '',
-    pending: { total: 0 }
-  })
-  const [sseConnected, setSseConnected] = useState(false)
+
+  // Realtime telemetry over authenticated SSE (fetch + ReadableStream).
+  const { metrics, connected: sseConnected } = useUsageStream(apiKey, isAuthenticated)
 
   // Save admin key
   const handleLogin = (e: React.FormEvent) => {
@@ -113,34 +89,6 @@ export default function App() {
     localStorage.removeItem('9router_admin_key')
     setIsAuthenticated(false)
   }
-
-  // SSE Stream Listener
-  useEffect(() => {
-    if (!isAuthenticated) return
-
-    const eventSource = new EventSource('/usage/stream')
-    
-    eventSource.onopen = () => {
-      setSseConnected(true)
-    }
-
-    eventSource.onmessage = (event) => {
-      try {
-        const data: SSEMetrics = JSON.parse(event.data)
-        setMetrics(data)
-      } catch {
-        // ignore parse error
-      }
-    }
-
-    eventSource.onerror = () => {
-      setSseConnected(false)
-    }
-
-    return () => {
-      eventSource.close()
-    }
-  }, [isAuthenticated])
 
   if (!isAuthenticated) {
     return (
@@ -352,7 +300,7 @@ function NavItem({
   )
 }
 
-function OverviewView({ metrics, onNavigate }: { metrics: SSEMetrics; onNavigate: (tab: any) => void }) {
+function OverviewView({ metrics, onNavigate }: { metrics: UsageMetrics; onNavigate: (tab: any) => void }) {
   return (
     <div className="space-y-6">
       {/* 4 Metric Bento Cards */}
@@ -676,10 +624,10 @@ function ConnectionModal({
   const isEdit = !!conn
   const [name, setName] = useState(conn?.name || '')
   const [provider, setProvider] = useState(conn?.provider || 'openai-compatible-chat')
-  const [authType, setAuthType] = useState(conn?.authType || 'apikey')
+  const [authType] = useState(conn?.authType || 'apikey')
   const [email, setEmail] = useState(conn?.email || '')
   const [priority, setPriority] = useState(conn?.priority ?? 1)
-  const [isActive, setIsActive] = useState(conn?.isActive ?? 1)
+  const [isActive] = useState(conn?.isActive ?? 1)
   const [apiSecret, setApiSecret] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -1238,6 +1186,11 @@ function ApiKeysView({ apiKey }: { apiKey: string }) {
       <p className="text-xs text-slate-400 mb-4">Daftar client token yang diizinkan memanggil endpoint engine.</p>
       {loading ? (
         <div className="text-xs text-slate-500 font-mono">Memuat keys...</div>
+      ) : error ? (
+        <div className="p-3 bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs rounded-lg flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          <span>{error}</span>
+        </div>
       ) : (
         <div className="space-y-2">
           {keys.map((k: any) => (
